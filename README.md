@@ -150,3 +150,57 @@ kubectl get events --sort-by=.lastTimestamp
 ```
 
 Verifique especialmente: imagem disponível, porta 8080, variáveis de conexão e estado do PVC `mysql-data`. Os probes de MySQL (`mysqladmin ping`) e Redis (`redis-cli ping`) também impedem que dependências ainda indisponíveis recebam tráfego.
+
+## OAT 2 — observabilidade, alertas e escala
+
+A aplicação Java expõe métricas Prometheus em `GET /metrics` na porta interna `9091` e recebe leituras de sensores em `POST /api/sensor-readings` na porta `8080`. O endpoint de métricas fica atrás de um Service `ClusterIP`, sem exposição pelo `NodePort` público. O endpoint de ingestão aceita corpos não vazios de até 64 KiB e rejeita corpos vazios (`400`) ou acima do limite (`413`). A rota de saúde `/` continua retornando `MecaniQA online`. As métricas da aplicação incluem CPU do processo, heap da JVM e contadores de leituras aceitas/rejeitadas.
+
+O diretório `k8s/monitoring/` contém a configuração do Prometheus, quatro dashboards Grafana (CPU, memória, erros e sucesso) e quatro regras de alerta provisionadas. `k8s/hpa.yaml` configura duas a dez réplicas, com alvos de CPU de 70% e memória de 80%, respeitando o scale-down estabilizado em cinco minutos. O HPA depende do `metrics-server`; Prometheus/Grafana usam PVCs e precisam de uma StorageClass funcional.
+
+### Publicar a stack no Kubernetes
+
+Os comandos abaixo usam o namespace `default`. Antes de aplicar os manifests, crie a credencial do Grafana fora do repositório e guarde a senha em local seguro:
+
+```powershell
+$grafanaPassword = [guid]::NewGuid().ToString("N")
+kubectl create secret generic grafana-admin-credentials `
+  --from-literal=admin-user=admin `
+  --from-literal=admin-password=$grafanaPassword
+Write-Output "Senha do Grafana: $grafanaPassword"
+```
+
+Construa e carregue/publique a imagem da API conforme o ambiente:
+
+```powershell
+docker build -t mecaniqa-api:1.0.0 ./Java-app
+# Para kind, por exemplo:
+kind load docker-image mecaniqa-api:1.0.0
+kubectl apply -k k8s
+kubectl get deployments,pods,services,pvc,hpa
+```
+
+`kubectl apply -k k8s` instala a aplicação, HPA, Prometheus, Grafana e os ConfigMaps versionados. O Prometheus descobre e coleta cada Pod da API no namespace `default`, e os serviços de monitoramento permanecem internos ao cluster.
+
+Abra os serviços em terminais separados:
+
+```powershell
+kubectl port-forward svc/grafana 3000:3000
+kubectl port-forward svc/prometheus 9090:9090
+kubectl port-forward svc/mecaniqa-api 30080:8080
+```
+
+Use Grafana em `http://localhost:3000` (usuário `admin`, senha criada acima), Prometheus em `http://localhost:9090` e a API em `http://localhost:30080`. Os quatro dashboards e os quatro alertas são provisionados automaticamente. Os limiares e procedimentos estão em [docs/runbooks.md](docs/runbooks.md).
+
+### Teste de carga e evidências
+
+Com o port-forward da API ativo, rode:
+
+```powershell
+python scripts/stress_test.py --workers 32 --duration-seconds 420 --error-rate 0.10
+```
+
+O relatório JSON datado é salvo em `evidence/`. O erro intencional de 10% valida os alertas customizados; repita com `--error-rate 0` para medir somente solicitações válidas. Acompanhe o HPA com `kubectl get hpa mecaniqa-api -w` e as réplicas com `kubectl get pods -l app.kubernetes.io/name=mecaniqa-api -w`. Capture no Grafana a série temporal e os alertas com o horário visível e salve as imagens e a saída dos comandos em `evidence/`.
+
+### Contrato operacional proposto
+
+As metas propostas são SLO de 99,95% e SLA de 99,9% por mês, com RTO de uma hora e RPO-alvo de 15 minutos. O RPO ainda não é cumprido pelo protótipo: as leituras recebidas não são persistidas. As definições, orçamento de indisponibilidade, alertas e runbooks estão em [docs/runbooks.md](docs/runbooks.md). O [relatório da sessão](docs/oat2-session-report.md) consolida fatos, decisões, ideias e resultados de validação; as metas devem ser formalmente aprovadas antes de assumir um compromisso contratual.

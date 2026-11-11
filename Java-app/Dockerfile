@@ -13,6 +13,6 @@ WORKDIR /app
 
 COPY --from=build /build/target/mecaniqa-1.0.0.jar app.jar
 
-EXPOSE 8080
+EXPOSE 8080 9091
 
 ENTRYPOINT ["java", "-jar", "app.jar"]
