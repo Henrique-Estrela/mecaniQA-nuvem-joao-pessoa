@@ -1,12 +1,98 @@
-# MecaniQA Nuvem - Encontro 3
+# MecaniQA Nuvem - OAT 1
+
+## Equipe
+
+- Nome do time: João Pessoa
+- Piloto: Matheus Kaick Rocha da Fonseca
+- Copiloto: Rafael Pinto Germano Pereira
+- QA: Arthur de Aquino Anjos
+- Arquiteto: Henrique Estrela Santos
+- Scrum Master: Lucas Almeida Silva
+- Repositório: `mecaniQA-nuvem-joao-pessoa`
+
+## Contexto da OAT 1
+
+O sistema da MecaniQA Tech rodava de forma instável em um servidor físico legado: a API Java consumia todos os recursos e derrubava o MySQL e o Redis. A solução definida foi isolar os serviços na camada virtual, orquestrá-los com Docker Compose e traduzir a arquitetura para Kubernetes.
+
+## Registro dos encontros
+
+### Encontro 1 - 26/08/2026
+
+**Problema:** Docker, Docker Compose e Kubernetes.
+
+**Decisões:**
+
+- Usar Java 17 com Alpine para obter uma imagem menor e adequada à containerização.
+- Expor a API na porta 8080 com mapeamento externo no Compose.
+- Manter o processo Java em primeiro plano com `ENTRYPOINT ["java", "-jar", "app.jar"]`.
+- Criar imagens isoladas para API, MySQL e Redis.
+
+**Participação registrada:** Matheus Kaick Rocha da Fonseca (Piloto), Rafael Pinto Germano Pereira (Copiloto), Arthur de Aquino Anjos (QA), Henrique Estrela Santos (Arquiteto) e Lucas Almeida Silva (Scrum Master).
+
+### Encontro 2 - 02/09/2026
+
+**Decisões:**
+
+- Usar o nome dos serviços (`mysql` e `redis`) como DNS interno, sem IPs fixos.
+- Persistir os dados com volumes Docker, evitando perda após reinicialização dos containers.
+- Subir API, MySQL e Redis com um único `docker compose up --build`.
+
+**Participação registrada:** Luan Vinicius Miranda (Piloto), Matheus Kaick Rocha da Fonseca (Copiloto), Arthur de Aquino (QA) e Henrique Estrela Santos (Scrum Master). Arquiteto: confirmar no registro do encontro.
+
+### Encontro 3 - 09/09/2026
+
+**Decisões:**
+
+- Usar Deployments em vez de Pods isolados para manter o estado desejado e permitir recuperação automática.
+- Expor apenas a API externamente com `NodePort` ou `LoadBalancer`.
+- Manter MySQL e Redis como Services `ClusterIP`, acessíveis somente dentro do cluster.
+- Utilizar K9s para inspecionar Pods, Deployments, Services, métricas e eventos de `CrashLoopBackOff`.
+
+**Participação registrada:** Henrique Estrela Santos (Piloto), Luan Vinicius Miranda da Silva (Copiloto), Rafael Pinto Germano Pereira (QA) e Arthur de Aquino (Arquiteto). Scrum Master: confirmar no registro do encontro.
 
 ## Objetivo
+
+Este repositório entrega a infraestrutura conteinerizada da MecaniQA Automotive Tech, com API Java, MySQL e Redis. O ambiente pode ser executado localmente com Docker Compose, provisionado inicialmente com Terraform e aplicado em Kubernetes.
 
 Os manifests em `k8s/` traduzem o ambiente do Docker Compose para Kubernetes:
 
 - `mecaniqa-api`: Deployment com duas réplicas e Service `NodePort` na porta `30080` para acesso local e externo.
 - `mysql`: Deployment com uma réplica, PVC para os dados e Service `ClusterIP`.
 - `redis`: Deployment com uma réplica e Service `ClusterIP`.
+
+## Estrutura da entrega
+
+- `Java-app/Dockerfile`: imagem multistage da API Java 17 com Alpine Linux.
+- `Dockerfile.mysql` e `Dockerfile.redis`: imagens independentes de MySQL e Redis.
+- `docker-compose.yml`: orquestração local, rede interna, healthchecks e volumes persistentes.
+- `terraform/main.tf`: provisionamento local da rede, volumes e containers Docker.
+- `k8s/`: Deployments, Services, Secret e PVCs declarativos.
+
+## Execução com Docker Compose
+
+```bash
+docker compose up --build -d
+docker compose ps
+curl http://localhost:8080/
+docker compose down
+```
+
+Os dados ficam nos volumes `mysql_data` e `redis_data`. Para apagar também os dados persistidos, use `docker compose down -v`.
+
+## Provisionamento com Terraform
+
+O Terraform utiliza o provider Docker e precisa do Docker Desktop em execução:
+
+```bash
+cd terraform
+terraform init
+terraform fmt -check
+terraform validate
+terraform apply -var="mysql_root_password=root"
+terraform destroy -var="mysql_root_password=root"
+```
+
+O módulo provisiona a API, o MySQL e o Redis na mesma rede Docker, com os nomes internos usados nas variáveis de conexão da API.
 
 ## Decisões de arquitetura
 
@@ -64,3 +150,57 @@ kubectl get events --sort-by=.lastTimestamp
 ```
 
 Verifique especialmente: imagem disponível, porta 8080, variáveis de conexão e estado do PVC `mysql-data`. Os probes de MySQL (`mysqladmin ping`) e Redis (`redis-cli ping`) também impedem que dependências ainda indisponíveis recebam tráfego.
+
+## OAT 2 — observabilidade, alertas e escala
+
+A aplicação Java expõe métricas Prometheus em `GET /metrics` na porta interna `9091` e recebe leituras de sensores em `POST /api/sensor-readings` na porta `8080`. O endpoint de métricas fica atrás de um Service `ClusterIP`, sem exposição pelo `NodePort` público. O endpoint de ingestão aceita corpos não vazios de até 64 KiB e rejeita corpos vazios (`400`) ou acima do limite (`413`). A rota de saúde `/` continua retornando `MecaniQA online`. As métricas da aplicação incluem CPU do processo, heap da JVM e contadores de leituras aceitas/rejeitadas.
+
+O diretório `k8s/monitoring/` contém a configuração do Prometheus, quatro dashboards Grafana (CPU, memória, erros e sucesso) e quatro regras de alerta provisionadas. `k8s/hpa.yaml` configura duas a dez réplicas, com alvos de CPU de 70% e memória de 80%, respeitando o scale-down estabilizado em cinco minutos. O HPA depende do `metrics-server`; Prometheus/Grafana usam PVCs e precisam de uma StorageClass funcional.
+
+### Publicar a stack no Kubernetes
+
+Os comandos abaixo usam o namespace `default`. Antes de aplicar os manifests, crie a credencial do Grafana fora do repositório e guarde a senha em local seguro:
+
+```powershell
+$grafanaPassword = [guid]::NewGuid().ToString("N")
+kubectl create secret generic grafana-admin-credentials `
+  --from-literal=admin-user=admin `
+  --from-literal=admin-password=$grafanaPassword
+Write-Output "Senha do Grafana: $grafanaPassword"
+```
+
+Construa e carregue/publique a imagem da API conforme o ambiente:
+
+```powershell
+docker build -t mecaniqa-api:1.0.0 ./Java-app
+# Para kind, por exemplo:
+kind load docker-image mecaniqa-api:1.0.0
+kubectl apply -k k8s
+kubectl get deployments,pods,services,pvc,hpa
+```
+
+`kubectl apply -k k8s` instala a aplicação, HPA, Prometheus, Grafana e os ConfigMaps versionados. O Prometheus descobre e coleta cada Pod da API no namespace `default`, e os serviços de monitoramento permanecem internos ao cluster.
+
+Abra os serviços em terminais separados:
+
+```powershell
+kubectl port-forward svc/grafana 3000:3000
+kubectl port-forward svc/prometheus 9090:9090
+kubectl port-forward svc/mecaniqa-api 30080:8080
+```
+
+Use Grafana em `http://localhost:3000` (usuário `admin`, senha criada acima), Prometheus em `http://localhost:9090` e a API em `http://localhost:30080`. Os quatro dashboards e os quatro alertas são provisionados automaticamente. Os limiares e procedimentos estão em [docs/runbooks.md](docs/runbooks.md).
+
+### Teste de carga e evidências
+
+Com o port-forward da API ativo, rode:
+
+```powershell
+python scripts/stress_test.py --workers 32 --duration-seconds 420 --error-rate 0.10
+```
+
+O relatório JSON datado é salvo em `evidence/`. O erro intencional de 10% valida os alertas customizados; repita com `--error-rate 0` para medir somente solicitações válidas. Acompanhe o HPA com `kubectl get hpa mecaniqa-api -w` e as réplicas com `kubectl get pods -l app.kubernetes.io/name=mecaniqa-api -w`. Capture no Grafana a série temporal e os alertas com o horário visível e salve as imagens e a saída dos comandos em `evidence/`.
+
+### Contrato operacional proposto
+
+As metas propostas são SLO de 99,95% e SLA de 99,9% por mês, com RTO de uma hora e RPO-alvo de 15 minutos. O RPO ainda não é cumprido pelo protótipo: as leituras recebidas não são persistidas. As definições, orçamento de indisponibilidade, alertas e runbooks estão em [docs/runbooks.md](docs/runbooks.md). O [relatório da sessão](docs/oat2-session-report.md) consolida fatos, decisões, ideias e resultados de validação; as metas devem ser formalmente aprovadas antes de assumir um compromisso contratual.

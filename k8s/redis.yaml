@@ -22,6 +22,11 @@ spec:
           ports:
             - name: redis
               containerPort: 6379
+          command: ["redis-server"]
+          args: ["--appendonly", "yes"]
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
           readinessProbe:
             exec:
               command:
@@ -45,6 +50,23 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  labels:
+    app.kubernetes.io/name: redis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 256Mi
 ---
 apiVersion: v1
 kind: Service
